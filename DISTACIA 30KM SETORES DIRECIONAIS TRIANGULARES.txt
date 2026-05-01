@@ -1,0 +1,123 @@
+import geopandas as gpd
+import matplotlib.pyplot as plt
+from shapely.geometry import Point, Polygon
+import numpy as np
+import contextily as ctx
+from matplotlib.patches import Patch
+import os
+
+# ================== CONFIGURAÇÕES ==================
+centroide_geo = Point(-51.22989, -30.03107)   # Longitude, Latitude
+
+raio_km = 30
+raio_m = raio_km * 1000
+
+angles = np.arange(0, 360, 45)
+setor_nomes = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+
+cores = ['#a6cee3', '#1f78b4', '#b2df8a', '#33a02c',
+         '#fb9a99', '#e31a1c', '#fdbf6f', '#ff7f00']
+
+output_folder = "setores_porto_alegre"
+os.makedirs(output_folder, exist_ok=True)
+
+# ================== CONVERSÃO PARA DMS (apenas para legenda) ==================
+def dd_to_dms(deg, is_lat=True):
+    d = int(abs(deg))
+    m = int((abs(deg) - d) * 60)
+    s = round((abs(deg) - d - m/60) * 3600, 1)
+    direction = 'S' if is_lat and deg < 0 else 'N' if is_lat else 'W' if deg < 0 else 'E'
+    return f"{d}° {m}' {s}\" {direction}"
+
+lat_dms = dd_to_dms(centroide_geo.y, is_lat=True)
+lon_dms = dd_to_dms(centroide_geo.x, is_lat=False)
+
+# ================== CRIAÇÃO DOS SETORES EM UTM ==================
+crs_geo = "EPSG:4326"
+crs_utm = "EPSG:32722"   # UTM Zone 22S
+
+gdf_centro = gpd.GeoDataFrame(geometry=[centroide_geo], crs=crs_geo)
+gdf_centro_utm = gdf_centro.to_crs(crs_utm)
+centro_utm = gdf_centro_utm.geometry.iloc[0]
+
+setores_list = []
+for i in range(8):
+    ang1 = angles[i]
+    ang2 = angles[(i + 1) % 8]
+    
+    n_pontos = 80
+    thetas = np.linspace(np.deg2rad(ang1), np.deg2rad(ang2), n_pontos)
+    
+    points_utm = [Point(centro_utm.x + raio_m * np.cos(theta),
+                        centro_utm.y + raio_m * np.sin(theta)) for theta in thetas]
+    
+    coords = [centro_utm] + points_utm + [centro_utm]
+    poly = Polygon(coords)
+    
+    setores_list.append({
+        'setor': setor_nomes[i],
+        'angulo_inicio': ang1,
+        'geometry': poly
+    })
+
+gdf_setores_utm = gpd.GeoDataFrame(setores_list, crs=crs_utm)
+
+# ================== EXPORTAR SHAPEFILES ==================
+gdf_setores_utm.to_file(f"{output_folder}/setores_30km.shp")
+gpd.GeoDataFrame(geometry=[centro_utm.buffer(raio_m)], crs=crs_utm).to_file(f"{output_folder}/buffer_30km.shp")
+gdf_centro_utm.to_file(f"{output_folder}/centroide.shp")
+
+print(f"✅ Shapefiles exportados com sucesso na pasta: '{output_folder}'")
+
+# ================== PLOTAGEM DA FIGURA ==================
+fig, ax = plt.subplots(figsize=(14, 12))
+
+# Plotar os setores
+gdf_setores_utm.plot(ax=ax, color=cores, alpha=0.28, edgecolor='darkblue', 
+                     linewidth=1.8, zorder=2)
+
+# Contorno do buffer
+buffer_utm = gpd.GeoDataFrame(geometry=[centro_utm.buffer(raio_m)], crs=crs_utm)
+buffer_utm.plot(ax=ax, color='none', edgecolor='red', linewidth=2.8, 
+                linestyle='--', zorder=3)
+
+# Ponto do centróide
+ax.plot(centro_utm.x, centro_utm.y, marker='*', color='red', markersize=14, 
+        markeredgecolor='white', markeredgewidth=2, zorder=5)
+
+# Rótulos dos setores (N, NE, E...)
+for idx, row in gdf_setores_utm.iterrows():
+    ang_rad = np.deg2rad(row['angulo_inicio'] + 22.5)
+    dist_label = raio_m * 0.82
+    x_label = centro_utm.x + dist_label * np.cos(ang_rad)
+    y_label = centro_utm.y + dist_label * np.sin(ang_rad)
+    
+    ax.text(x_label, y_label, row['setor'], fontsize=13, fontweight='bold',
+            ha='center', va='center', color='black', zorder=6)
+
+# Base cartográfica OpenStreetMap
+ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik, 
+                crs=crs_utm, zoom=12, alpha=0.95)
+
+# Legenda
+legend_elements = [Patch(facecolor=cores[i], edgecolor='darkblue', alpha=0.35, label=setor_nomes[i]) 
+                   for i in range(8)]
+legend_elements += [
+    plt.Line2D([0], [0], color='red', lw=2.8, linestyle='--', label='Buffer 30 km'),
+    plt.Line2D([0], [0], marker='*', color='w', markerfacecolor='red', markersize=14,
+               markeredgecolor='white', label=f'Centróide Centro Histórico\n{lat_dms}\n{lon_dms}')
+]
+
+ax.legend(handles=legend_elements, loc='upper right', fontsize=11, framealpha=0.95)
+
+ax.set_xlabel('Coordenada UTM Leste (m)')
+ax.set_ylabel('Coordenada UTM Norte (m)')
+
+plt.tight_layout()
+plt.show()
+
+# ================== SALVAR A FIGURA ==================
+fig.savefig(f"{output_folder}/figura_setores_30km.png", dpi=400, bbox_inches='tight')
+fig.savefig(f"{output_folder}/figura_setores_30km.pdf", bbox_inches='tight')
+
+print(f"✅ Figura salva em alta resolução: {output_folder}/figura_setores_30km.png")
