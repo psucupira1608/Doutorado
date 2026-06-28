@@ -5,23 +5,28 @@ import numpy as np
 import contextily as ctx
 from matplotlib.patches import Patch
 import os
+from matplotlib.ticker import FuncFormatter
 
 # ================== CONFIGURAÇÕES ==================
-centroide_geo = Point(-51.22989, -30.03107)   # Longitude, Latitude
-
+centroide_geo = Point(-51.2300, -30.0335)
 raio_km = 30
 raio_m = raio_km * 1000
 
-angles = np.arange(0, 360, 45)
-setor_nomes = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
-
-cores = ['#a6cee3', '#1f78b4', '#b2df8a', '#33a02c',
-         '#fb9a99', '#e31a1c', '#fdbf6f', '#ff7f00']
-
-output_folder = "setores_porto_alegre"
+output_folder = "setores_porto_alegre_corrigido"
 os.makedirs(output_folder, exist_ok=True)
 
-# ================== CONVERSÃO PARA DMS (apenas para legenda) ==================
+# ================== ROSA DOS VENTOS (nomenclatura PT-BR) ==================
+setor_nomes   = ['N', 'NE', 'L', 'SE', 'S', 'SO', 'O', 'NO']
+cores = [
+    '#1f78b4', '#a6cee3', '#ff7f00', '#fdbf6f',
+    '#e31a1c', '#fb9a99', '#33a02c', '#b2df8a',
+]
+
+angulos_inicio = [67.5,  22.5, -22.5,  -67.5, -112.5, -157.5, 157.5, 112.5]
+angulos_fim    = [112.5, 67.5,  22.5,  -22.5,  -67.5, -112.5, 202.5, 157.5]
+angulos_centro = [90,    45,     0,    -45,     -90,   -135,   180,   135  ]
+
+# ================== DMS ==================
 def dd_to_dms(deg, is_lat=True):
     d = int(abs(deg))
     m = int((abs(deg) - d) * 60)
@@ -32,33 +37,25 @@ def dd_to_dms(deg, is_lat=True):
 lat_dms = dd_to_dms(centroide_geo.y, is_lat=True)
 lon_dms = dd_to_dms(centroide_geo.x, is_lat=False)
 
-# ================== CRIAÇÃO DOS SETORES EM UTM ==================
+# ================== PROJEÇÃO UTM ==================
 crs_geo = "EPSG:4326"
-crs_utm = "EPSG:32722"   # UTM Zone 22S
-
+crs_utm = "EPSG:32722"
 gdf_centro = gpd.GeoDataFrame(geometry=[centroide_geo], crs=crs_geo)
 gdf_centro_utm = gdf_centro.to_crs(crs_utm)
 centro_utm = gdf_centro_utm.geometry.iloc[0]
 
+# ================== CONSTRUÇÃO DOS SETORES ==================
 setores_list = []
 for i in range(8):
-    ang1 = angles[i]
-    ang2 = angles[(i + 1) % 8]
-    
-    n_pontos = 80
-    thetas = np.linspace(np.deg2rad(ang1), np.deg2rad(ang2), n_pontos)
-    
-    points_utm = [Point(centro_utm.x + raio_m * np.cos(theta),
-                        centro_utm.y + raio_m * np.sin(theta)) for theta in thetas]
-    
-    coords = [centro_utm] + points_utm + [centro_utm]
-    poly = Polygon(coords)
-    
-    setores_list.append({
-        'setor': setor_nomes[i],
-        'angulo_inicio': ang1,
-        'geometry': poly
-    })
+    a1 = np.deg2rad(angulos_inicio[i])
+    a2 = np.deg2rad(angulos_fim[i])
+    if a2 < a1:
+        a2 += 2 * np.pi
+    thetas = np.linspace(a1, a2, 100)
+    coords = [(centro_utm.x, centro_utm.y)] + \
+             [(centro_utm.x + raio_m * np.cos(t), centro_utm.y + raio_m * np.sin(t)) for t in thetas] + \
+             [(centro_utm.x, centro_utm.y)]
+    setores_list.append({'setor': setor_nomes[i], 'angulo_centro': angulos_centro[i], 'geometry': Polygon(coords)})
 
 gdf_setores_utm = gpd.GeoDataFrame(setores_list, crs=crs_utm)
 
@@ -66,58 +63,96 @@ gdf_setores_utm = gpd.GeoDataFrame(setores_list, crs=crs_utm)
 gdf_setores_utm.to_file(f"{output_folder}/setores_30km.shp")
 gpd.GeoDataFrame(geometry=[centro_utm.buffer(raio_m)], crs=crs_utm).to_file(f"{output_folder}/buffer_30km.shp")
 gdf_centro_utm.to_file(f"{output_folder}/centroide.shp")
+print(f"✅ Shapefiles exportados na pasta: '{output_folder}'")
 
-print(f"✅ Shapefiles exportados com sucesso na pasta: '{output_folder}'")
+# ================== PLOTAGEM ==================
+fig, ax = plt.subplots(figsize=(15, 13))
 
-# ================== PLOTAGEM DA FIGURA ==================
-fig, ax = plt.subplots(figsize=(14, 12))
+# ── Definir extent ANTES do basemap ──
+margem = raio_m * 0.08
+ax.set_xlim(centro_utm.x - raio_m - margem, centro_utm.x + raio_m + margem)
+ax.set_ylim(centro_utm.y - raio_m - margem, centro_utm.y + raio_m + margem)
 
-# Plotar os setores
-gdf_setores_utm.plot(ax=ax, color=cores, alpha=0.28, edgecolor='darkblue', 
-                     linewidth=1.8, zorder=2)
+# ── Basemap PRIMEIRO (zorder=1) ──
+try:
+    ctx.add_basemap(
+        ax,
+        source=ctx.providers.OpenStreetMap.Mapnik,
+        crs=crs_utm,
+        zoom=11,
+        alpha=0.90,
+        zorder=1
+    )
+    print("✅ Basemap carregado.")
+except Exception as e:
+    print(f"⚠️ Basemap não carregado: {e}")
+    ax.set_facecolor('#e8e8e8')
 
-# Contorno do buffer
+# Setores coloridos
+gdf_setores_utm.plot(ax=ax, color=cores, alpha=0.28, edgecolor='darkblue', linewidth=1.8, zorder=2)
+
+# Buffer circular
 buffer_utm = gpd.GeoDataFrame(geometry=[centro_utm.buffer(raio_m)], crs=crs_utm)
-buffer_utm.plot(ax=ax, color='none', edgecolor='red', linewidth=2.8, 
-                linestyle='--', zorder=3)
+buffer_utm.plot(ax=ax, color='none', edgecolor='red', linewidth=2.8, linestyle='--', zorder=3)
 
-# Ponto do centróide
-ax.plot(centro_utm.x, centro_utm.y, marker='*', color='red', markersize=14, 
-        markeredgecolor='white', markeredgewidth=2, zorder=5)
+# Linhas-eixo pontilhadas
+for ang_deg in angulos_centro:
+    ang_rad = np.deg2rad(ang_deg)
+    ax.plot([centro_utm.x, centro_utm.x + raio_m * np.cos(ang_rad)],
+            [centro_utm.y, centro_utm.y + raio_m * np.sin(ang_rad)],
+            color='darkblue', linewidth=0.7, linestyle=':', alpha=0.6, zorder=4)
 
-# Rótulos dos setores (N, NE, E...)
+# Ponto central — estrela vermelha
+ax.plot(centro_utm.x, centro_utm.y, marker='*', color='red', markersize=18,
+        markeredgecolor='white', markeredgewidth=1.5, zorder=6)
+
+# Anotação "Centro Histórico"
+ax.annotate(
+    'Centro Histórico\nde Porto Alegre',
+    xy=(centro_utm.x, centro_utm.y),
+    xytext=(centro_utm.x + raio_m * 0.13, centro_utm.y - raio_m * 0.12),
+    fontsize=10, fontweight='bold', color='darkred',
+    bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='darkred', alpha=0.88),
+    arrowprops=dict(arrowstyle='->', color='darkred', lw=1.4),
+    zorder=7
+)
+
+# Rótulos dos setores
+dist_label = raio_m * 0.78
 for idx, row in gdf_setores_utm.iterrows():
-    ang_rad = np.deg2rad(row['angulo_inicio'] + 22.5)
-    dist_label = raio_m * 0.82
-    x_label = centro_utm.x + dist_label * np.cos(ang_rad)
-    y_label = centro_utm.y + dist_label * np.sin(ang_rad)
-    
-    ax.text(x_label, y_label, row['setor'], fontsize=13, fontweight='bold',
-            ha='center', va='center', color='black', zorder=6)
+    ang_rad = np.deg2rad(row['angulo_centro'])
+    x_lbl = centro_utm.x + dist_label * np.cos(ang_rad)
+    y_lbl = centro_utm.y + dist_label * np.sin(ang_rad)
+    ax.text(x_lbl, y_lbl, row['setor'],
+            fontsize=14, fontweight='bold', ha='center', va='center', color='black',
+            bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.6, edgecolor='none'),
+            zorder=8)
 
-# Base cartográfica OpenStreetMap
-ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik, 
-                crs=crs_utm, zoom=12, alpha=0.95)
+# Formatação dos eixos
+ax.xaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{int(x):,}".replace(",", ".")))
+ax.yaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{int(x):,}".replace(",", ".")))
 
 # Legenda
-legend_elements = [Patch(facecolor=cores[i], edgecolor='darkblue', alpha=0.35, label=setor_nomes[i]) 
-                   for i in range(8)]
+legend_elements = [
+    Patch(facecolor=cores[i], edgecolor='darkblue', alpha=0.35, label=setor_nomes[i])
+    for i in range(8)
+]
 legend_elements += [
     plt.Line2D([0], [0], color='red', lw=2.8, linestyle='--', label='Buffer 30 km'),
-    plt.Line2D([0], [0], marker='*', color='w', markerfacecolor='red', markersize=14,
-               markeredgecolor='white', label=f'Centróide Centro Histórico\n{lat_dms}\n{lon_dms}')
+    plt.Line2D([0], [0], marker='*', color='w', markerfacecolor='red', markersize=16,
+               markeredgecolor='white', label=f'Centro Histórico\n{lat_dms}\n{lon_dms}'),
 ]
-
 ax.legend(handles=legend_elements, loc='upper right', fontsize=11, framealpha=0.95)
 
 ax.set_xlabel('Coordenada UTM Leste (m)')
 ax.set_ylabel('Coordenada UTM Norte (m)')
+ax.set_title(
+    'Setores de 30 km – Rosa dos Ventos\nCentro Histórico de Porto Alegre\n(N, NE, L, SE, S, SO, O, NO)',
+    fontsize=15, pad=20
+)
 
 plt.tight_layout()
-plt.show()
-
-# ================== SALVAR A FIGURA ==================
 fig.savefig(f"{output_folder}/figura_setores_30km.png", dpi=400, bbox_inches='tight')
 fig.savefig(f"{output_folder}/figura_setores_30km.pdf", bbox_inches='tight')
-
-print(f"✅ Figura salva em alta resolução: {output_folder}/figura_setores_30km.png")
+print("✅ Figura salva com sucesso!")
+plt.show() 
